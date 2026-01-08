@@ -214,44 +214,26 @@ with st.form("new_order_form", clear_on_submit=True):
                 else:
                     st.error(f"❌ فشل الحفظ: {result}")
 
-# Display recent orders
+# Search functionality
 st.markdown("---")
-st.subheader("📋 آخر 10 أوردرات")
+st.subheader("🔍 البحث في الأوردرات")
 
-if len(st.session_state.orders_df) > 0:
-    # Sort by date if column exists
-    if 'تاريخ التسجيل' in st.session_state.orders_df.columns:
-        recent_orders = st.session_state.orders_df.tail(10).sort_values('تاريخ التسجيل', ascending=False)
-    else:
-        recent_orders = st.session_state.orders_df.tail(10)
+search_col1, search_col2 = st.columns(2)
+
+with search_col1:
+    search_term = st.text_input("ابحث عن أوردر (كود، اسم، موبايل)", placeholder="اكتب للبحث...")
+
+if search_term and len(st.session_state.orders_df) > 0:
+    search_results = st.session_state.orders_df[
+        st.session_state.orders_df.astype(str).apply(
+            lambda row: row.str.contains(search_term, case=False, na=False).any(), 
+            axis=1
+        )
+    ]
     
-    st.dataframe(
-        recent_orders, 
-        use_container_width=True, 
-        hide_index=True,
-        height=400
-    )
-    
-    # Search functionality
-    st.markdown("---")
-    st.subheader("🔍 البحث في الأوردرات")
-    
-    search_col1, search_col2 = st.columns(2)
-    
-    with search_col1:
-        search_term = st.text_input("ابحث عن أوردر (كود، اسم، موبايل)", placeholder="اكتب للبحث...")
-    
-    if search_term:
-        search_results = st.session_state.orders_df[
-            st.session_state.orders_df.astype(str).apply(
-                lambda row: row.str.contains(search_term, case=False, na=False).any(), 
-                axis=1
-            )
-        ]
-        
-        st.write(f"نتائج البحث: {len(search_results)} أوردر")
-        st.dataframe(search_results, use_container_width=True, hide_index=True)
-else:
+    st.write(f"نتائج البحث: {len(search_results)} أوردر")
+    st.dataframe(search_results, use_container_width=True, hide_index=True)
+elif len(st.session_state.orders_df) == 0:
     st.info("💡 لا توجد أوردرات مسجلة حتى الآن. ابدأ بإضافة أول أوردر!")
 
 # Statistics by area
