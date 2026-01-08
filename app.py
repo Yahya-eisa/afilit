@@ -1,271 +1,277 @@
 import streamlit as st
 import pandas as pd
 import datetime
-import io
-import arabic_reshaper
-from bidi.algorithm import get_display
-from reportlab.lib.pagesizes import A4, landscape
-from reportlab.lib import colors
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak
-from reportlab.lib.styles import ParagraphStyle
-from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.pdfbase import pdfmetrics
 import pytz
-import dropbox  # ✅ أضفنا الـ import
+import gspread
+from google.oauth2.service_account import Credentials
 
-# ---------- Dropbox Setup ----------
-def upload_to_dropbox_silent(file_content, filename):
-    """Upload file to Dropbox silently in background using Refresh Token"""
+# ---------- Google Sheets Setup ----------
+SCOPES = [
+    'https://www.googleapis.com/auth/spreadsheets',
+    'https://www.googleapis.com/auth/drive'
+]
+
+def get_google_sheets_client():
+    """Initialize Google Sheets client"""
+    creds = Credentials.from_service_account_info(
+        st.secrets["gcp_service_account"],
+        scopes=SCOPES
+    )
+    return gspread.authorize(creds)
+
+def load_orders_from_sheet(sheet_name="Orders Database"):
+    """Load existing orders from Google Sheets"""
     try:
-        dbx = dropbox.Dropbox(
-            oauth2_refresh_token=st.secrets["dropbox"]["refresh_token"],
-            app_key=st.secrets["dropbox"]["app_key"],
-            app_secret=st.secrets["dropbox"]["app_secret"]
-        )
+        client = get_google_sheets_client()
+        spreadsheet = client.open(sheet_name)
+        worksheet = spreadsheet.sheet1
         
-        # رفع الملف في مجلد KHOSOMAAT
-        dbx.files_upload(
-            file_content, 
-            f"/KHOSOMAAT/{filename}", 
-            mode=dropbox.files.WriteMode.overwrite
-        )
-        return True
+        # Get all records
+        data = worksheet.get_all_records()
+        
+        if data:
+            df = pd.DataFrame(data)
+            return df
+        else:
+            # Create empty dataframe with columns
+            columns = [
+                'كود الاوردر', 'اسم العميل', 'رقم الموبايل', 'المنطقة', 'العنوان',
+                'حالة الاوردر', 'اسم الصنف', 'اللون', 'المقاس', 'الكمية',
+                'الملاحظات', 'الإجمالي مع الشحن', 'تاريخ التسجيل'
+            ]
+            return pd.DataFrame(columns=columns)
     except Exception as e:
-        return False
+        st.error(f"خطأ في التحميل: {str(e)}")
+        columns = [
+            'كود الاوردر', 'اسم العميل', 'رقم الموبايل', 'المنطقة', 'العنوان',
+            'حالة الاوردر', 'اسم الصنف', 'اللون', 'المقاس', 'الكمية',
+            'الملاحظات', 'الإجمالي مع الشحن', 'تاريخ التسجيل'
+        ]
+        return pd.DataFrame(columns=columns)
 
-# ---------- Arabic helpers ----------
-def fix_arabic(text):
-    if pd.isna(text):
-        return ""
-    reshaped = arabic_reshaper.reshape(str(text))
-    return get_display(reshaped)
-
-
-def fill_down(series):
-    return series.ffill()
-
-
-def replace_muaaqal_with_confirm_safe(df):
-    return df.replace('معلق', 'تم التأكيد')
-
-
-# ---------- City classifier ----------
-def classify_city(city):
-    if pd.isna(city) or str(city).strip() == '':
-        return "Other City"
-
-    city = str(city).strip()
-
-    city_map = {
-        "منطقة صباح السالم": {"صباح السالم","العدان","المسيلة","أبو فطيرة","أبو الحصانية","مبارك الكبير",
-                              "القصور","القرين","الفنيطيس","المسايل"},
-        "منطقة المهبولة": {"الفنطاس","المهبولة"},
-        "منطقة الفحيحيل": {"الفحيحيل الصناعية","أبو حليفة","المنقف","الفحيحيل"},
-        "منطقة جابر الاحمد": {"مدينة جابر الأحمد","شمال غرب الصليبيخات","الرحاب","صباح الناصر",
-                              "الفردوس","الأندلس","النهضة","غرناطة","الدوحة",
-                              "جنوب الدوحة / القيروان","القيروان"},
-        "منطقة العارضية": {"العارضية حرفية","العارضية","العارضية المنطقة الصناعية",
-                            "الصليبخات","الري","اشبيلية","الرقعي"},
-        "منطقة سلوي": {"مبارك العبدالله غرب مشرف","سلوى","بيان","الرميثية","مشرف"},
-        "منطقة السالمية": {"السالمية","ميدان حولي","البدع"},
-        "منطقة الجهراء": {"الجهراء","الصلبية الصناعية","الصليبية الصناعية","مزارع الصليبية",
-                          "الصليبية السكنية","مدينة سعد العبد الله","الصليبية","أمغرة","سكراب امغرة",
-                          "جنوب امغرة","القصر","النعيم","معسكرات الجهراء","تيماء","النسيم",
-                          "الجهراء المنطقة الصناعية","جواخير الجهراء","العيون","الواحة",
-                          "اسطبلات الجهراء","مزارع الطليبية"},
-        "منطقة خيطان": {"خيطان"},
-        "منطقة الفروانية": {"الفروانية"},
-        "منطقه الصباحية": {"اسواق القرين","الظهر","جابر العلي","العقيلة","الرقة","المقوع",
-                           "فهد الأحمد","الصباحية","هدية","الجليعه","علي صباح السالم"},
-        "منطقة صباح الاحمد": {"صباح الأحمد3","الجليعة","صباح الأحمد","مدينة صباح الأحمد",
-                             "ميناء عبد الله","بنيدر","الوفرة","الخيران","الزور","النويصب",
-                             "شمال الأحمدي","جنوب الأحمدي","شرق الأحمدي","وسط الأحمدي",
-                             "الأحمدي","غرب الأحمدي","ام الهيمان","الشعيبة"},
-        "منطقة حولي": {"حولي"},
-        "منطقة الجابرية": {"الجابرية","قرطبة","اليرموك","السرة"},
-        "منطقة العاصمة": {"حدائق السور","دسمان","القبلة","المرقاب","مدينة الكويت","المباركية","شرق‎"},
-        "منطقة الشويخ": {"الشويخ الصناعية","الشويخ","الشويخ السكنية","ميناء الشويخ"},
-        "منطقة الشعب": {"ضاحية عبد الله السالم","الدعية","القادسية","النزهة","الفيحاء","كيفان",
-                        "الشعب","الروضة","الخالدية","العديلية","الدسمة","الشامية","المنصورية","بنيد القار"},
+def save_order_to_sheet(order_data, sheet_name="Orders Database"):
+    """Save new order to Google Sheets"""
+    try:
+        client = get_google_sheets_client()
         
-        "منطقة عبدالله المبارك": {"الشدادية","غرب عبدالله المبارك","عبدالله المبارك",
-        "كبد","الرحاب","الضجيج","الافينيوز","عبدالله مبارك الصباح"},
+        try:
+            spreadsheet = client.open(sheet_name)
+        except:
+            # Create new spreadsheet if doesn't exist
+            spreadsheet = client.create(sheet_name)
+            spreadsheet.share('', perm_type='anyone', role='writer')
         
-        "منطقة جنوب السرة": {"السلام",
-                                 "العمرية","منطقة المطار","حطين","الشهداء","صبحان","الزهراء",
-                                 "الصديق","الرابية","جنوب السرة",},
-
+        worksheet = spreadsheet.sheet1
         
-        "جليب الشيوخ": {"جليب الشيوخ","العباسية","شارع محمد بن القاسم","الحساوي"},
-        "المطلاع": {"المطلاع","العبدلي","السكراب"},
-    }
+        # Check if headers exist
+        existing_data = worksheet.get_all_values()
+        
+        if not existing_data:
+            # Add headers
+            headers = [
+                'كود الاوردر', 'اسم العميل', 'رقم الموبايل', 'المنطقة', 'العنوان',
+                'حالة الاوردر', 'اسم الصنف', 'اللون', 'المقاس', 'الكمية',
+                'الملاحظات', 'الإجمالي مع الشحن', 'تاريخ التسجيل'
+            ]
+            worksheet.append_row(headers)
+        
+        # Append new order
+        row_data = [
+            order_data.get('كود الاوردر', ''),
+            order_data.get('اسم العميل', ''),
+            order_data.get('رقم الموبايل', ''),
+            order_data.get('المنطقة', ''),
+            order_data.get('العنوان', ''),
+            order_data.get('حالة الاوردر', ''),
+            order_data.get('اسم الصنف', ''),
+            order_data.get('اللون', ''),
+            order_data.get('المقاس', ''),
+            order_data.get('الكمية', ''),
+            order_data.get('الملاحظات', ''),
+            order_data.get('الإجمالي مع الشحن', ''),
+            order_data.get('تاريخ التسجيل', '')
+        ]
+        
+        worksheet.append_row(row_data)
+        return True, spreadsheet.url
+    except Exception as e:
+        return False, str(e)
 
-    for area, cities in city_map.items():
-        if city in cities:
-            return area
+# ---------- Main App ----------
+st.set_page_config(page_title="📝 تسجيل الأوردرات", layout="wide")
+st.title("📝 نظام تسجيل الأوردرات - Affiliate Dashboard")
 
-    return "Other City"
+# Initialize session state
+if 'orders_df' not in st.session_state:
+    st.session_state.orders_df = None
+    st.session_state.sheet_url = None
 
+# Load existing data from Google Sheets
+if st.session_state.orders_df is None:
+    with st.spinner("🔄 جاري تحميل البيانات من Google Sheets..."):
+        df = load_orders_from_sheet()
+        st.session_state.orders_df = df
+        
+        if len(df) > 0:
+            st.success(f"✅ تم تحميل {len(df)} أوردر من Google Sheets")
+        else:
+            st.info("📝 جاهز لإضافة أوردرات جديدة")
 
-# ---------- PDF table builder ----------
-def df_to_pdf_table(df, title="KHOSOMAAT"):
-    if "اجمالي عدد القطع في الطلب" in df.columns:
-        df = df.rename(columns={"اجمالي عدد القطع في الطلب": "عدد القطع"})
+# Display statistics in header
+col1, col2, col3 = st.columns(3)
 
-    final_cols = [
-        'كود الاوردر', 'اسم العميل', 'المنطقة', 'العنوان',
-        'المدينة', 'رقم موبايل العميل', 'حالة الاوردر',
-        'عدد القطع', 'الملاحظات', 'اسم الصنف',
-        'اللون', 'المقاس', 'الكمية', 'الإجمالي مع الشحن'
-    ]
+with col1:
+    st.metric("📊 إجمالي الأوردرات", len(st.session_state.orders_df))
 
-    df = df[[c for c in final_cols if c in df.columns]].copy()
+with col2:
+    if len(st.session_state.orders_df) > 0 and 'الإجمالي مع الشحن' in st.session_state.orders_df.columns:
+        total_revenue = pd.to_numeric(st.session_state.orders_df['الإجمالي مع الشحن'], errors='coerce').sum()
+        st.metric("💰 إجمالي المبيعات", f"{total_revenue:.2f} KD")
+    else:
+        st.metric("💰 إجمالي المبيعات", "0.00 KD")
 
-    if 'رقم موبايل العميل' in df.columns:
-        df['رقم موبايل العميل'] = df['رقم موبايل العميل'].apply(
-            lambda x: str(int(float(x))) if pd.notna(x) and str(x).replace('.', '', 1).isdigit()
-            else ("" if pd.isna(x) else str(x))
-        )
+with col3:
+    if st.session_state.sheet_url:
+        st.link_button("🔗 فتح Google Sheet", st.session_state.sheet_url)
+    else:
+        st.info("سيتم إنشاء الشيت مع أول أوردر")
 
-    safe_cols = {
-        'الإجمالي مع الشحن', 'كود الاوردر', 'رقم موبايل العميل', 'اسم العميل',
-        'المنطقة', 'العنوان', 'المدينة', 'حالة الاوردر', 'الملاحظات',
-        'اسم الصنف', 'اللون', 'المقاس'
-    }
+# Form for new order
+st.markdown("---")
+st.subheader("➕ إضافة أوردر جديد")
 
-    for col in df.columns:
-        if col not in safe_cols:
-            df[col] = df[col].apply(
-                lambda x: str(int(float(x))) if pd.notna(x) and str(x).replace('.', '', 1).isdigit()
-                else ("" if pd.isna(x) else str(x))
-            )
-
-    styleN = ParagraphStyle(name='Normal', fontName='Arabic-Bold', fontSize=9, alignment=1, wordWrap='RTL')
-    styleBH = ParagraphStyle(name='Header', fontName='Arabic-Bold', fontSize=10, alignment=1, wordWrap='RTL')
-    styleTitle = ParagraphStyle(name='Title', fontName='Arabic-Bold', fontSize=14, alignment=1, wordWrap='RTL')
-
-    data = []
-    data.append([Paragraph(fix_arabic(col), styleBH) for col in df.columns])
-
-    for _, row in df.iterrows():
-        data.append([
-            Paragraph(fix_arabic("" if pd.isna(row[col]) else str(row[col])), styleN)
-            for col in df.columns
-        ])
-
-    col_widths_cm = [2, 2, 1.5, 3, 2, 3, 1.5, 1.5, 2.5, 3.5, 1.5, 1.5, 1, 1.5]
-    col_widths = [max(c * 28.35, 15) for c in col_widths_cm]
-
-    tz = pytz.timezone('Africa/Cairo')
-    today = datetime.datetime.now(tz).strftime("%Y-%m-%d")
-    title_text = f"{title} | KHOSOMAAT | {today} | KHOSOMAAT"
-
-    elements = [
-        Paragraph(fix_arabic(title_text), styleTitle),
-        Spacer(1, 14)
-    ]
-
-    table = Table(data, colWidths=col_widths[:len(df.columns)], repeatRows=1)
-
-    table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#64B5F6")),
-        ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),
-        ('GRID', (0, 0), (-1, -1), 0.25, colors.black),
-        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-    ]))
-
-    elements.append(table)
-    elements.append(PageBreak())
-
-    return elements
-
-
-# ---------- Streamlit App ----------
-st.set_page_config(page_title="🔥🏷️🏷️ KHOSOMAAT Orders Processor", layout="wide")
-st.title("🔥🏷️🏷️ KHOSOMAAT Orders Processor>>>>>")
-st.markdown(".... ارفع اي عدد ملفات يعجبك")
-
-uploaded_files = st.file_uploader(
-    "Upload Excel files (.xlsx)",
-    accept_multiple_files=True,
-    type=["xlsx"]
-)
-
-if uploaded_files:
-    # ✅ Upload original files to Dropbox silently
-    for uploaded_file in uploaded_files:
-        file_bytes = uploaded_file.read()
-        upload_to_dropbox_silent(file_bytes, uploaded_file.name)
-        uploaded_file.seek(0)
+with st.form("new_order_form", clear_on_submit=True):
+    col1, col2, col3 = st.columns(3)
     
-    pdfmetrics.registerFont(TTFont('Arabic', 'Amiri-Regular.ttf'))
-    pdfmetrics.registerFont(TTFont('Arabic-Bold', 'Amiri-Bold.ttf'))
+    with col1:
+        order_code = st.text_input("كود الاوردر *", placeholder="مثال: ORD-001")
+        customer_name = st.text_input("اسم العميل *", placeholder="اسم العميل")
+        phone = st.text_input("رقم الموبايل *", placeholder="مثال: 96512345678")
+        area = st.text_input("المنطقة *", placeholder="مثال: حولي")
+    
+    with col2:
+        address = st.text_area("العنوان", placeholder="العنوان التفصيلي", height=100)
+        status = st.selectbox("حالة الاوردر *", 
+                             ["تم التأكيد", "قيد التجهيز", "تم الشحن", "تم التسليم", "ملغي"],
+                             index=0)
+        product_name = st.text_input("اسم الصنف *", placeholder="اسم المنتج")
+    
+    with col3:
+        color = st.text_input("اللون", placeholder="مثال: أحمر")
+        size = st.text_input("المقاس", placeholder="مثال: L")
+        quantity = st.number_input("الكمية *", min_value=1, value=1, step=1)
+        notes = st.text_area("الملاحظات", placeholder="أي ملاحظات إضافية", height=100)
+        total = st.number_input("الإجمالي مع الشحن *", min_value=0.0, value=0.0, step=0.5, format="%.2f")
+    
+    col_submit1, col_submit2 = st.columns([3, 1])
+    with col_submit1:
+        submitted = st.form_submit_button("💾 حفظ الأوردر", use_container_width=True, type="primary")
+    with col_submit2:
+        refresh = st.form_submit_button("🔄 تحديث", use_container_width=True)
+    
+    if refresh:
+        st.session_state.orders_df = None
+        st.rerun()
+    
+    if submitted:
+        # Validation
+        if not order_code or not customer_name or not phone or not area or not product_name:
+            st.error("⚠️ يرجى ملء جميع الحقول المطلوبة (*)")
+        else:
+            # Get current timestamp
+            tz = pytz.timezone('Africa/Cairo')
+            timestamp = datetime.datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
+            
+            # Create new order
+            new_order = {
+                'كود الاوردر': order_code,
+                'اسم العميل': customer_name,
+                'رقم الموبايل': phone,
+                'المنطقة': area,
+                'العنوان': address,
+                'حالة الاوردر': status,
+                'اسم الصنف': product_name,
+                'اللون': color,
+                'المقاس': size,
+                'الكمية': quantity,
+                'الملاحظات': notes,
+                'الإجمالي مع الشحن': total,
+                'تاريخ التسجيل': timestamp
+            }
+            
+            # Save to Google Sheets
+            with st.spinner("💾 جاري الحفظ على Google Sheets..."):
+                success, result = save_order_to_sheet(new_order)
+                
+                if success:
+                    st.session_state.sheet_url = result
+                    st.success(f"✅ تم حفظ الأوردر #{order_code} بنجاح!")
+                    st.balloons()
+                    
+                    # Reload data
+                    st.session_state.orders_df = None
+                    st.rerun()
+                else:
+                    st.error(f"❌ فشل الحفظ: {result}")
 
-    all_frames = []
+# Display recent orders
+st.markdown("---")
+st.subheader("📋 آخر 10 أوردرات")
 
-    for file in uploaded_files:
-        xls = pd.read_excel(file, sheet_name=None, engine="openpyxl")
-        for _, df in xls.items():
-            df = df.dropna(how="all")
-            all_frames.append(df)
+if len(st.session_state.orders_df) > 0:
+    # Sort by date if column exists
+    if 'تاريخ التسجيل' in st.session_state.orders_df.columns:
+        recent_orders = st.session_state.orders_df.tail(10).sort_values('تاريخ التسجيل', ascending=False)
+    else:
+        recent_orders = st.session_state.orders_df.tail(10)
+    
+    st.dataframe(
+        recent_orders, 
+        use_container_width=True, 
+        hide_index=True,
+        height=400
+    )
+    
+    # Search functionality
+    st.markdown("---")
+    st.subheader("🔍 البحث في الأوردرات")
+    
+    search_col1, search_col2 = st.columns(2)
+    
+    with search_col1:
+        search_term = st.text_input("ابحث عن أوردر (كود، اسم، موبايل)", placeholder="اكتب للبحث...")
+    
+    if search_term:
+        search_results = st.session_state.orders_df[
+            st.session_state.orders_df.astype(str).apply(
+                lambda row: row.str.contains(search_term, case=False, na=False).any(), 
+                axis=1
+            )
+        ]
+        
+        st.write(f"نتائج البحث: {len(search_results)} أوردر")
+        st.dataframe(search_results, use_container_width=True, hide_index=True)
+else:
+    st.info("💡 لا توجد أوردرات مسجلة حتى الآن. ابدأ بإضافة أول أوردر!")
 
-    if all_frames:
-        merged_df = pd.concat(all_frames, ignore_index=True, sort=False)
-        merged_df = replace_muaaqal_with_confirm_safe(merged_df)
-
-        if 'المدينة' in merged_df.columns:
-            merged_df['المدينة'] = merged_df['المدينة'].ffill().fillna('')
-
-        if 'كود الاوردر' in merged_df.columns:
-            merged_df['كود الاوردر'] = fill_down(merged_df['كود الاوردر'])
-
-        if 'اسم العميل' in merged_df.columns:
-            merged_df['اسم العميل'] = fill_down(merged_df['اسم العميل'])
-
-        if 'المدينة' in merged_df.columns and 'اسم الصنف' in merged_df.columns:
-            prod_present = merged_df['اسم الصنف'].notna() & merged_df['اسم الصنف'].astype(str).str.strip().ne('')
-            city_empty = merged_df['المدينة'].isna() | merged_df['المدينة'].astype(str).str.strip().eq('')
-            mask = prod_present & city_empty
-            if mask.any():
-                city_ffill = merged_df['المدينة'].ffill()
-                merged_df.loc[mask, 'المدينة'] = city_ffill.loc[mask]
-
-        merged_df['المنطقة'] = merged_df['المدينة'].apply(classify_city)
-
-        merged_df['المنطقة'] = pd.Categorical(
-            merged_df['المنطقة'],
-            categories=[c for c in merged_df['المنطقة'].unique() if c != "Other City"] + ["Other City"],
-            ordered=True
-        )
-
-        merged_df = merged_df.sort_values(['المنطقة', 'كود الاوردر'])
-
-        buffer = io.BytesIO()
-        doc = SimpleDocTemplate(
-            buffer,
-            pagesize=landscape(A4),
-            leftMargin=15, rightMargin=15, topMargin=15, bottomMargin=15
-        )
-
-        elements = []
-        for group_name, group_df in merged_df.groupby('المنطقة'):
-            elements.extend(df_to_pdf_table(group_df, title=str(group_name)))
-
-        doc.build(elements)
-        buffer.seek(0)
-
-        tz = pytz.timezone('Africa/Cairo')
-        today = datetime.datetime.now(tz).strftime("%Y-%m-%d")
-        file_name = f"سواقين خصومات - {today}.pdf"
-
-        # ✅ Upload PDF to Dropbox silently
-        upload_to_dropbox_silent(buffer.getvalue(), file_name)
-
-        st.success("✅تم تجهيز ملف PDF بنجاح")
-        st.download_button(
-            label="⬇️⬇️ تحميل ملف PDF",
-            data=buffer.getvalue(),
-            file_name=file_name,
-            mime="application/pdf"
-        )
+# Statistics by area
+if len(st.session_state.orders_df) > 0:
+    st.markdown("---")
+    st.subheader("📊 إحصائيات حسب المنطقة")
+    
+    if 'المنطقة' in st.session_state.orders_df.columns:
+        area_stats = st.session_state.orders_df['المنطقة'].value_counts()
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.write("**عدد الأوردرات لكل منطقة:**")
+            st.dataframe(area_stats.reset_index().rename(columns={'index': 'المنطقة', 'المنطقة': 'العدد'}), 
+                        use_container_width=True, hide_index=True)
+        
+        with col2:
+            if 'حالة الاوردر' in st.session_state.orders_df.columns:
+                st.write("**إحصائيات حسب الحالة:**")
+                status_stats = st.session_state.orders_df['حالة الاوردر'].value_counts()
+                st.dataframe(status_stats.reset_index().rename(columns={'index': 'الحالة', 'حالة الاوردر': 'العدد'}), 
+                            use_container_width=True, hide_index=True)
