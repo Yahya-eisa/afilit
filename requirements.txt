@@ -1,8 +1,8 @@
 streamlit
 pandas
 openpyxl
-reportlab
-arabic-reshaper
-python-bidi
+gspread
+google-auth
+google-auth-oauthlib
+google-auth-httplib2
 pytz
-dropbox
